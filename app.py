@@ -4,8 +4,10 @@ import psycopg2
 import time
 from datetime import datetime
 import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 
-# Read RabbitMQ and PostgreSQL configurations from environment variables
+# RabbitMQ and PostgreSQL configurations from environment variables
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST")
 RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT"))
 RABBITMQ_USER = os.getenv("RABBITMQ_USER")
@@ -77,19 +79,81 @@ def process_message(ch, method, properties, body):
     # Acknowledge message
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
-# Main function to consume messages
-def main():
-    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
-    connection = pika.BlockingConnection(
-        pika.ConnectionParameters(host=RABBITMQ_HOST, port=RABBITMQ_PORT, credentials=credentials)
-    )
-    channel = connection.channel()
-    channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=RABBITMQ_QUEUE, on_message_callback=process_message)
+# HTTP server handler to expose the /data endpoint
+class MessageHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/data":
+            try:
+                # Fetch data from the PostgreSQL messages table
+                with psycopg2.connect(
+                    host=POSTGRES_HOST,
+                    database=POSTGRES_DB,
+                    user=POSTGRES_USER,
+                    password=POSTGRES_PASSWORD,
+                ) as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT * FROM messages;")
+                        rows = cursor.fetchall()
 
-    print("Waiting for messages. To exit press CTRL+C")
-    channel.start_consuming()
+                        # Convert query result to a list of dictionaries
+                        messages = [
+                            {
+                                "id": row[0],
+                                "message_json": row[1],
+                                "message_soap": row[2],
+                                "creation_datetime": row[3],
+                                "processing_duration_ms": row[4],
+                                "status": row[5],
+                                "error_message": row[6],
+                            }
+                            for row in rows
+                        ]
+
+                # Send JSON response
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(messages).encode("utf-8"))
+
+            except Exception as e:
+                # Handle errors
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+        else:
+            # Handle unknown routes
+            self.send_response(404)
+            self.end_headers()
+
+# Run RabbitMQ consumer and HTTP server concurrently
+def main():
+    # Start RabbitMQ consumer
+    def start_rabbitmq_consumer():
+        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(host=RABBITMQ_HOST, port=RABBITMQ_PORT, credentials=credentials)
+        )
+        channel = connection.channel()
+        channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+        channel.basic_qos(prefetch_count=1)
+        channel.basic_consume(queue=RABBITMQ_QUEUE, on_message_callback=process_message)
+
+        print("Waiting for messages. To exit press CTRL+C")
+        channel.start_consuming()
+
+    # Start HTTP server
+    def start_http_server():
+        server = HTTPServer(("0.0.0.0", 5000), MessageHandler)
+        print("HTTP server running on port 5000")
+        server.serve_forever()
+
+    # Start both components in separate threads
+    rabbitmq_thread = threading.Thread(target=start_rabbitmq_consumer)
+    rabbitmq_thread.daemon = True
+    rabbitmq_thread.start()
+
+    start_http_server()
 
 if __name__ == "__main__":
     main()
