@@ -98,4 +98,38 @@ def start_rabbitmq_consumer():
         print("Connecting to RabbitMQ...")
         credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
         connection = pika.BlockingConnection(
-            pika.Connection
+            pika.ConnectionParameters(host=RABBITMQ_HOST, port=RABBITMQ_PORT, credentials=credentials)
+        )
+        channel = connection.channel()
+        channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+        channel.basic_qos(prefetch_count=1)
+        channel.basic_consume(queue=RABBITMQ_QUEUE, on_message_callback=process_message)
+
+        print("✅ RabbitMQ Consumer is Running")
+        channel.start_consuming()
+
+    except Exception as e:
+        print(f"❌ Error connecting to RabbitMQ: {e}")
+
+# Start HTTP server
+def start_http_server():
+    print("🚀 Starting HTTP server on 0.0.0.0:5000")
+    try:
+        server = HTTPServer(("0.0.0.0", 5000), MessageHandler)
+        print("✅ HTTP server is now running on port 5000")
+        server.serve_forever()
+    except Exception as e:
+        print(f"❌ HTTP server failed to start: {e}")
+
+# Main function to start both components
+def main():
+    # Start RabbitMQ in a separate thread
+    rabbitmq_thread = threading.Thread(target=start_rabbitmq_consumer, daemon=True)
+    rabbitmq_thread.start()
+
+    # Start HTTP server in the main thread
+    start_http_server()
+
+if __name__ == "__main__":
+    main()
+
