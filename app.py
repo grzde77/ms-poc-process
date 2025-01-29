@@ -2,36 +2,30 @@ import pika
 import json
 import psycopg2
 import time
-from datetime import datetime
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
+from datetime import datetime
+from flask import Flask, jsonify
 
-# RabbitMQ and PostgreSQL configurations from environment variables
-RABBITMQ_HOST = os.getenv("RABBITMQ_HOST")
-RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT"))
-RABBITMQ_USER = os.getenv("RABBITMQ_USER")
-RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD")
-RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE", "json_queue")  # Default queue name
+# RabbitMQ and PostgreSQL configurations
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5672))
+RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
+RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "guest")
+RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE", "json_queue")
 
-POSTGRES_HOST = os.getenv("POSTGRES_HOST")
-POSTGRES_DB = os.getenv("POSTGRES_DB")
-POSTGRES_USER = os.getenv("POSTGRES_USER")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "your_db_name")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "your_db_user")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "your_db_password")
 
-# Function to transform JSON to SOAP (Placeholder - Implement as needed)
-def json_to_soap(json_data):
-    return f"<SOAP>{json.dumps(json_data)}</SOAP>"
+# Initialize Flask
+app = Flask(__name__)
 
-# Function to process messages and insert into PostgreSQL
-def process_message(ch, method, properties, body):
+# Function to process messages from RabbitMQ and insert into PostgreSQL
+def process_message(channel, method, properties, body):
     try:
-        # Acknowledge message immediately to prevent requeueing
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-        print(f"Received message: {body.decode()}")  # Debugging log
-
         message_json = json.loads(body)
-        message_soap = json_to_soap(message_json)
+        print(f"📥 Received message: {message_json}")
 
         with psycopg2.connect(
             host=POSTGRES_HOST,
@@ -41,61 +35,22 @@ def process_message(ch, method, properties, body):
         ) as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO messages (message_json, message_soap, creation_datetime) VALUES (%s, %s, %s)",
-                    (json.dumps(message_json), message_soap, datetime.now()),
+                    "INSERT INTO messages (message_json, creation_datetime) VALUES (%s, %s)",
+                    (json.dumps(message_json), datetime.now()),
                 )
                 conn.commit()
+                print("✅ Message saved to PostgreSQL")
 
-        print("Message successfully saved to PostgreSQL")
+        # Acknowledge the message
+        channel.basic_ack(delivery_tag=method.delivery_tag)
 
     except Exception as e:
-        print(f"Error processing message: {e}")
+        print(f"❌ Error processing message: {e}")
 
-# HTTP server handler to expose the /data endpoint
-class MessageHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/data":
-            try:
-                with psycopg2.connect(
-                    host=POSTGRES_HOST,
-                    database=POSTGRES_DB,
-                    user=POSTGRES_USER,
-                    password=POSTGRES_PASSWORD,
-                ) as conn:
-                    with conn.cursor() as cursor:
-                        cursor.execute("SELECT * FROM messages;")
-                        rows = cursor.fetchall()
-
-                        messages = [
-                            {
-                                "id": row[0],
-                                "message_json": row[1],
-                                "message_soap": row[2],
-                                "creation_datetime": row[3].isoformat(),
-                                "status": row[4] if len(row) > 4 else None,
-                                "error_message": row[5] if len(row) > 5 else None,
-                            }
-                            for row in rows
-                        ]
-
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(messages).encode("utf-8"))
-
-            except Exception as e:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-# Start RabbitMQ consumer
+# Function to start RabbitMQ consumer
 def start_rabbitmq_consumer():
     try:
-        print("Connecting to RabbitMQ...")
+        print("🔄 Connecting to RabbitMQ...")
         credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
         connection = pika.BlockingConnection(
             pika.ConnectionParameters(host=RABBITMQ_HOST, port=RABBITMQ_PORT, credentials=credentials)
@@ -111,25 +66,42 @@ def start_rabbitmq_consumer():
     except Exception as e:
         print(f"❌ Error connecting to RabbitMQ: {e}")
 
-# Start HTTP server
-def start_http_server():
-    print("🚀 Starting HTTP server on 0.0.0.0:5000")
+# Function to fetch data from PostgreSQL
+@app.route("/data", methods=["GET"])
+def get_data():
     try:
-        server = HTTPServer(("0.0.0.0", 5000), MessageHandler)
-        print("✅ HTTP server is now running on port 5000")
-        server.serve_forever()
-    except Exception as e:
-        print(f"❌ HTTP server failed to start: {e}")
+        with psycopg2.connect(
+            host=POSTGRES_HOST,
+            database=POSTGRES_DB,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD,
+        ) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM messages ORDER BY creation_datetime DESC LIMIT 10;")
+                rows = cursor.fetchall()
 
-# Main function to start both components
-def main():
-    # Start RabbitMQ in a separate thread
-    rabbitmq_thread = threading.Thread(target=start_rabbitmq_consumer, daemon=True)
+                messages = [
+                    {
+                        "id": row[0],
+                        "message_json": row[1],
+                        "creation_datetime": row[2].isoformat(),
+                    }
+                    for row in rows
+                ]
+
+        return jsonify(messages), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Main function to start everything
+if __name__ == "__main__":
+    from threading import Thread
+
+    # Start RabbitMQ consumer in a background thread
+    rabbitmq_thread = Thread(target=start_rabbitmq_consumer, daemon=True)
     rabbitmq_thread.start()
 
-    # Start HTTP server in the main thread
-    start_http_server()
-
-if __name__ == "__main__":
-    main()
-
+    # Start Flask server
+    print("🚀 Starting Flask server on port 5000")
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
