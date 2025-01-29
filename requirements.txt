@@ -1,4 +1,4 @@
 pika==1.3.1           # For connecting to RabbitMQ
 psycopg2-binary==2.9.6  # For connecting to PostgreSQL
 Flask==2.2.3
-Werkzeug==2.2.3
+Werkzeug==2.0.3  # Downgrade to a compatible version
