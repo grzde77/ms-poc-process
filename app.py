@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 from flask import Flask, jsonify
 
-# RabbitMQ and PostgreSQL configurations
+# RabbitMQ and PostgreSQL configurations from ENV variables
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
 RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", 5672))
 RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
@@ -18,15 +18,50 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "your_db_name")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "your_db_user")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "your_db_password")
 
-# Initialize Flask
+# Initialize Flask App
 app = Flask(__name__)
 
-# Function to process messages from RabbitMQ and insert into PostgreSQL
+def json_to_soap(json_data):
+    """
+    Convert JSON message to SOAP format.
+    """
+    soap_template = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+    <soapenv:Header/>
+    <soapenv:Body>
+        <event>
+            <name>{event}</name>
+            <user_id>{user_id}</user_id>
+            <timestamp>{timestamp}</timestamp>
+        </event>
+    </soapenv:Body>
+</soapenv:Envelope>"""
+    
+    return soap_template.format(
+        event=json_data["event"],
+        user_id=json_data["user_id"],
+        timestamp=json_data["timestamp"]
+    )
+
 def process_message(channel, method, properties, body):
+    """
+    Process RabbitMQ messages and insert into PostgreSQL.
+    """
+    start_time = time.time()
+    status = "Completed"
+    error_message = None
+
     try:
+        # Parse JSON message
         message_json = json.loads(body)
         print(f"📥 Received message: {message_json}")
 
+        # Convert JSON to SOAP
+        message_soap = json_to_soap(message_json)
+
+        # Calculate processing time
+        processing_duration_ms = int((time.time() - start_time) * 1000)
+
+        # Insert into PostgreSQL
         with psycopg2.connect(
             host=POSTGRES_HOST,
             database=POSTGRES_DB,
@@ -34,21 +69,59 @@ def process_message(channel, method, properties, body):
             password=POSTGRES_PASSWORD,
         ) as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO messages (message_json, creation_datetime) VALUES (%s, %s)",
-                    (json.dumps(message_json), datetime.now()),
-                )
+                cursor.execute("""
+                    INSERT INTO messages (message_json, message_soap, creation_datetime, processing_duration_ms, status, error_message)
+                    VALUES (%s, %s, %s, %s, %s, %s);
+                """, (
+                    json.dumps(message_json),  # message_json
+                    message_soap,              # message_soap
+                    datetime.now(),            # creation_datetime
+                    processing_duration_ms,    # processing_duration_ms
+                    status,                    # status
+                    error_message              # error_message (NULL if successful)
+                ))
                 conn.commit()
-                print("✅ Message saved to PostgreSQL")
 
-        # Acknowledge the message
+        print("✅ Message saved to PostgreSQL")
+
+        # Acknowledge message
         channel.basic_ack(delivery_tag=method.delivery_tag)
 
     except Exception as e:
-        print(f"❌ Error processing message: {e}")
+        # Log error and update status
+        status = "Failed"
+        error_message = str(e)
+        print(f"❌ Error processing message: {error_message}")
 
-# Function to start RabbitMQ consumer
+        # Insert failed message into PostgreSQL (optional)
+        with psycopg2.connect(
+            host=POSTGRES_HOST,
+            database=POSTGRES_DB,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD,
+        ) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO messages (message_json, message_soap, creation_datetime, processing_duration_ms, status, error_message)
+                    VALUES (%s, %s, %s, %s, %s, %s);
+                """, (
+                    json.dumps(message_json),  # message_json
+                    None,                      # message_soap (NULL if conversion failed)
+                    datetime.now(),            # creation_datetime
+                    int((time.time() - start_time) * 1000),  # processing_duration_ms
+                    status,                    # status = Failed
+                    error_message              # error_message
+                ))
+                conn.commit()
+
+        # Acknowledge message to prevent infinite retry
+        channel.basic_ack(delivery_tag=method.delivery_tag)
+
+
 def start_rabbitmq_consumer():
+    """
+    Starts the RabbitMQ consumer process.
+    """
     try:
         print("🔄 Connecting to RabbitMQ...")
         credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
@@ -66,9 +139,12 @@ def start_rabbitmq_consumer():
     except Exception as e:
         print(f"❌ Error connecting to RabbitMQ: {e}")
 
-# Function to fetch data from PostgreSQL
+
 @app.route("/data", methods=["GET"])
 def get_data():
+    """
+    Fetch the latest 10 messages from PostgreSQL.
+    """
     try:
         with psycopg2.connect(
             host=POSTGRES_HOST,
@@ -84,7 +160,11 @@ def get_data():
                     {
                         "id": row[0],
                         "message_json": row[1],
-                        "creation_datetime": row[2].isoformat(),
+                        "message_soap": row[2],
+                        "creation_datetime": row[3].isoformat(),
+                        "processing_duration_ms": row[4],
+                        "status": row[5],
+                        "error_message": row[6]
                     }
                     for row in rows
                 ]
@@ -94,7 +174,7 @@ def get_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Main function to start everything
+
 if __name__ == "__main__":
     from threading import Thread
 
