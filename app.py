@@ -18,6 +18,11 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "your_db_name")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "your_db_user")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "your_db_password")
 
+SOAP_MESSAGE_DIR = os.getenv("SOAP_MESSAGE_DIR", "/mnt/soap_messages/")  # Directory to store SOAP messages
+
+# Ensure the directory exists
+os.makedirs(SOAP_MESSAGE_DIR, exist_ok=True)
+
 # Initialize Flask
 app = Flask(__name__)
 
@@ -42,7 +47,7 @@ def json_to_soap(json_data):
 
 # Function to process messages from RabbitMQ and insert into PostgreSQL
 def process_message(ch, method, properties, body):
-    start_time = time.time()  # Capture processing start time
+    start_time = time.time()  # Start timing when message is received
     status = "Completed"
     error_message = None
 
@@ -50,11 +55,19 @@ def process_message(ch, method, properties, body):
         # Decode JSON message
         message_json = json.loads(body.decode("utf-8"))
 
-        # Transform JSON to SOAP format
+        # Convert JSON to SOAP
         message_soap = json_to_soap(message_json)
 
-        # Calculate processing duration in milliseconds
-        processing_duration_ms = int((time.time() - start_time) * 1000)
+        # Generate a meaningful filename
+        timestamp_str = datetime.now().strftime("%Y%m%d%H%M%S")
+        user_id = message_json.get("user_id", "unknown")
+        soap_filename = f"soap_message_{timestamp_str}_{user_id}.xml"
+        soap_filepath = os.path.join(SOAP_MESSAGE_DIR, soap_filename)
+
+        # Save SOAP message to Persistent Volume
+        with open(soap_filepath, "w") as soap_file:
+            soap_file.write(message_soap)
+        print(f"📄 SOAP message saved to {soap_filepath}")
 
         # Insert into PostgreSQL
         with psycopg2.connect(
@@ -64,15 +77,16 @@ def process_message(ch, method, properties, body):
             password=POSTGRES_PASSWORD,
         ) as conn:
             with conn.cursor() as cursor:
+                processing_duration_ms = int((time.time() - start_time) * 1000)  # End timing after insertion
                 cursor.execute("""
-                    INSERT INTO messages (message_json, message_soap, creation_datetime, processing_duration_ms, status, error_message)
-                    VALUES (%s, %s, CURRENT_TIMESTAMP, %s, %s, %s);
+                    INSERT INTO messages (message_json, message_soap, processing_duration_ms, status, error_message, creation_datetime)
+                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP);
                 """, (
-                    json.dumps(message_json),  # message_json
-                    message_soap,              # message_soap
-                    processing_duration_ms,    # processing_duration_ms
-                    status,                    # status
-                    error_message              # error_message (NULL if no errors)
+                    json.dumps(message_json),  # JSON data
+                    message_soap,              # SOAP message
+                    processing_duration_ms,    # Processing duration in ms
+                    status,                    # Status
+                    error_message              # Error message (None if no error)
                 ))
                 conn.commit()
 
@@ -82,7 +96,7 @@ def process_message(ch, method, properties, body):
         error_message = str(e)
         print(f"❌ Error processing message: {error_message}")
 
-        # Insert failed message into PostgreSQL for debugging
+        # Insert failed message into PostgreSQL
         with psycopg2.connect(
             host=POSTGRES_HOST,
             database=POSTGRES_DB,
@@ -91,12 +105,12 @@ def process_message(ch, method, properties, body):
         ) as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO messages (message_json, message_soap, creation_datetime, processing_duration_ms, status, error_message)
-                    VALUES (%s, NULL, CURRENT_TIMESTAMP, NULL, %s, %s);
+                    INSERT INTO messages (message_json, message_soap, processing_duration_ms, status, error_message, creation_datetime)
+                    VALUES (%s, NULL, NULL, %s, %s, CURRENT_TIMESTAMP);
                 """, (
-                    json.dumps(message_json),  # message_json
-                    status,                    # status
-                    error_message              # error_message
+                    json.dumps(message_json),  # JSON data
+                    status,                    # Status
+                    error_message              # Error message
                 ))
                 conn.commit()
 
@@ -165,3 +179,4 @@ if __name__ == "__main__":
     # Start Flask server
     print("🚀 Starting Flask server on port 5000")
     app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+
