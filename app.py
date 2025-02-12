@@ -26,6 +26,13 @@ os.makedirs(SOAP_MESSAGE_DIR, exist_ok=True)
 # Initialize Flask
 app = Flask(__name__)
 
+# Simulate CPU Load Function
+def simulate_cpu_load():
+    """Artificially increase CPU usage to trigger HPA"""
+    print("⚡ Simulating CPU Load...")
+    num_operations = 10**6  # Increase this value if needed
+    _ = [math.sqrt(i) for i in range(num_operations)]  # CPU-intensive operation
+    
 # Function to transform JSON to SOAP format
 def json_to_soap(json_data):
     soap_template = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
@@ -54,6 +61,9 @@ def process_message(ch, method, properties, body):
     try:
         # Decode JSON message
         message_json = json.loads(body.decode("utf-8"))
+
+        # Simulate CPU load
+        simulate_cpu_load()
 
         # Convert JSON to SOAP
         message_soap = json_to_soap(message_json)
