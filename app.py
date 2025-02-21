@@ -2,6 +2,7 @@ import pika
 import json
 import psycopg2
 import time
+import math
 import os
 from datetime import datetime
 from flask import Flask, jsonify
