@@ -4,7 +4,7 @@ import psycopg2
 import time
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, jsonify
 
 # RabbitMQ and PostgreSQL configurations
